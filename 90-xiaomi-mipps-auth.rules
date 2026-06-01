@@ -1,0 +1,4 @@
+# Trigger Xiaomi MiPPS authentication after USB-C partner attach.
+# The long-running work is delegated to systemd; udev only schedules the oneshot service.
+
+ACTION=="add", SUBSYSTEM=="typec", KERNEL=="port*-partner", TAG+="systemd", ENV{SYSTEMD_WANTS}+="xiaomi-mipps-auth.service"
