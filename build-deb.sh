@@ -6,7 +6,7 @@ src_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 pkg_src="$src_dir"
 work=${TMPDIR:-/tmp}/xiaomi-mipps-auth-deb
 pkg=$work/pkg
-out=${1:-$work/xiaomi-mipps-auth_0.8_arm64.deb}
+out=${1:-$work/xiaomi-mipps-auth_0.11_arm64.deb}
 
 rm -rf "$work"
 mkdir -p "$pkg/DEBIAN"

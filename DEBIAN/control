@@ -1,9 +1,9 @@
 Package: xiaomi-mipps-auth
-Version: 0.8
+Version: 0.11
 Section: admin
 Priority: optional
 Architecture: arm64
 Depends: python3, systemd, udev, util-linux
 Maintainer: siergtc <i@4t.pw>
-Description: Automatic Xiaomi MiPPS charger authentication for sheng
- Runs Xiaomi MiPPS authentication when a compatible USB-C charger is attached.
+Description: Automatic Xiaomi MiPPS/PPS charger authentication for sheng
+ Runs Xiaomi MiPPS authentication, with standard PPS fallback, when a compatible USB-C charger is attached.

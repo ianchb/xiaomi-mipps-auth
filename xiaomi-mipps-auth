@@ -43,6 +43,16 @@ FG_KEYS = [
     "02b3a85ea4c1a6db6fbd1fd5767c1a42314f37ba7c9460c9ed79a12bb2b5d99c",
 ]
 
+XIAOMI_SVID = 0x2717
+ANDROID_CMD_SETTLE = {
+    1: 0.005,
+    2: 0.005,
+    3: 0.005,
+    4: 0.500,
+    5: 0.500,
+    6: 0.005,
+}
+
 
 class UnsupportedChargerError(Exception):
     def __init__(self, message, terminal=False):
@@ -214,12 +224,16 @@ def wait_state(root, expected, timeout):
     raise UnsupportedChargerError(f"timed out waiting for VDM state {expected}, last={last}")
 
 
-def send_vdm(root, cmd, payload="null", timeout=2.0, wait=True):
+def send_vdm(root, cmd, payload="null", timeout=2.0, wait=True, settle=0.0):
     write_node(root, "request_vdm_cmd", f"{cmd},{payload}")
     if not wait:
-        time.sleep(0.1)
+        time.sleep(settle)
         return vdm_state(root)
-    return wait_state(root, cmd, timeout)
+    state = wait_state(root, cmd, timeout)
+    if settle:
+        time.sleep(settle)
+        state = vdm_state(root)
+    return state
 
 
 def normalize_adapter_id(adapter_id):
@@ -227,6 +241,32 @@ def normalize_adapter_id(adapter_id):
     if len(adapter_id) == 8 and adapter_id != "00000000":
         bytes.fromhex(adapter_id)
         return adapter_id
+    return None
+
+
+def normalize_adapter_svid(adapter_svid):
+    adapter_svid = adapter_svid.strip().lower()
+    if not adapter_svid:
+        return None
+    token = adapter_svid.split()[0]
+    if token in ("2717", "0x2717"):
+        return XIAOMI_SVID
+    try:
+        return int(token, 0)
+    except ValueError:
+        return None
+
+
+def wait_adapter_svid(root, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            adapter_svid = normalize_adapter_svid(read_node(root, "adapter_svid"))
+            if adapter_svid is not None:
+                return adapter_svid
+        except OSError:
+            return None
+        time.sleep(0.05)
     return None
 
 
@@ -241,6 +281,18 @@ def detect_adapter_id(root, timeout):
             pass
         time.sleep(0.05)
     return None
+
+
+def should_skip_pdo2(root):
+    try:
+        pdo2 = read_node(root, "pdo2").strip().lower()
+    except OSError:
+        return False
+    return len(pdo2) >= 8 and pdo2[:8] == "00000000"
+
+
+def auth_already_completed(root, state):
+    return state in (6, 7)
 
 
 def print_status(root):
@@ -316,7 +368,7 @@ def main():
                         help="do not request Type-C host data role before Xiaomi UVDM auth")
     parser.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-completed", action="store_true",
-                        help="skip the handshake if the current VDM state already reports completion")
+                        help="deprecated; completed handshakes are skipped unless --force is used")
     parser.add_argument("--once-per-attach", action="store_true",
                         help="attempt authentication at most once for the current Type-C partner attach")
     parser.add_argument("--state-file", default="/run/xiaomi-mipps-auth/last-attach",
@@ -340,7 +392,7 @@ def main():
                   file=sys.stderr)
 
     state, _ = vdm_state(root)
-    if state == 7 and args.skip_completed:
+    if auth_already_completed(root, state) and not args.force:
         print(f"sysfs={root}")
         enable_battery_auth(root)
         print("MiPPS auth sequence already completed")
@@ -356,16 +408,31 @@ def main():
         if not args.no_data_role_swap:
             ensure_typec_host(args.timeout)
 
+        adapter_svid = wait_adapter_svid(root, args.timeout)
+        if adapter_svid != XIAOMI_SVID:
+            if adapter_svid is None:
+                raise UnsupportedChargerError("adapter_svid sysfs node did not report a valid SVID",
+                                              terminal=True)
+            raise UnsupportedChargerError(f"unsupported adapter_svid=0x{adapter_svid:04x}",
+                                          terminal=True)
+        print(f"adapter_svid=0x{adapter_svid:04x}")
+
+        if should_skip_pdo2(root):
+            raise UnsupportedChargerError("pdo2 reports no source PDO for adapter authentication",
+                                          terminal=True)
+
         enable_battery_auth(root)
 
-        send_vdm(root, 1, timeout=args.timeout)
-        send_vdm(root, 2, timeout=args.timeout)
-        send_vdm(root, 3, timeout=args.timeout)
-        send_vdm(root, 4, SEEDS[seed_index], timeout=args.timeout)
+        send_vdm(root, 1, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[1])
+        send_vdm(root, 2, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[2])
+        send_vdm(root, 3, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[3])
+        send_vdm(root, 4, SEEDS[seed_index], timeout=args.timeout,
+                 settle=ANDROID_CMD_SETTLE[4])
 
         challenge = secrets.token_hex(16)
         print(f"challenge={challenge}")
-        _, auth = send_vdm(root, 5, challenge, timeout=args.timeout)
+        _, auth = send_vdm(root, 5, challenge, timeout=args.timeout,
+                           settle=ANDROID_CMD_SETTLE[5])
 
         adapter_id = detect_adapter_id(root, args.timeout)
         if not adapter_id:
@@ -375,18 +442,32 @@ def main():
         digest = hmac.new(bytes.fromhex(KEYS[seed_index]),
                           bytes.fromhex(challenge + adapter_id),
                           hashlib.sha256).hexdigest()
-        if auth.lower()[:32] != digest[:32]:
-            raise UnsupportedChargerError(f"adapter auth mismatch: charger={auth[:32]}",
-                                          terminal=True)
+        pd_auth = auth.lower()[:32] == digest[:32]
+        if not pd_auth:
+            print(
+                f"adapter auth mismatch: seed_index={seed_index} adapter_id={adapter_id} "
+                f"expected={digest[:32]} charger={auth[:32]}",
+                file=sys.stderr)
         print(f"adapter_id={adapter_id}")
 
-        send_vdm(root, 6, "01000000", timeout=args.timeout, wait=False)
-        send_vdm(root, 8, digest[32:], timeout=args.timeout)
-        send_vdm(root, 7, "01000000", timeout=args.timeout, wait=False)
+        pd_auth_payload = "01000000" if pd_auth else "00000000"
+        send_vdm(root, 6, pd_auth_payload, timeout=args.timeout, wait=False,
+                 settle=0.1)
+        if pd_auth:
+            try:
+                send_vdm(root, 8, digest[32:], timeout=args.timeout)
+                print("reverse_auth=1")
+            except UnsupportedChargerError as e:
+                print(f"warning: reverse_auth=0: {e}", file=sys.stderr)
+        else:
+            print("reverse_auth=0")
+        send_vdm(root, 7, pd_auth_payload, timeout=args.timeout, wait=False,
+                 settle=0.1)
 
         if os.path.exists(os.path.join(root, "pd_verifed")):
-            write_node(root, "pd_verifed", "1")
+            write_node(root, "pd_verifed", "1" if pd_auth else "0")
 
+        print(f"pd_auth={1 if pd_auth else 0}")
         print("MiPPS auth sequence completed")
         print_status(root)
     except UnsupportedChargerError as e:

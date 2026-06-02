@@ -1,5 +1,5 @@
 [Unit]
-Description=Xiaomi MiPPS charger authentication
+Description=Xiaomi MiPPS/PPS charger authentication
 ConditionPathExistsGlob=/sys/devices/platform/pmic-glink/*/xiaomi/request_vdm_cmd
 
 [Service]
