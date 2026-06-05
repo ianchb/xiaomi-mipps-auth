@@ -6,8 +6,10 @@ import glob
 import hashlib
 import hmac
 import os
+import pwd
 import random
 import secrets
+import subprocess
 import sys
 import time
 
@@ -44,6 +46,7 @@ FG_KEYS = [
 ]
 
 XIAOMI_SVID = 0x2717
+FAST_CHARGE_NOTIFICATION_TITLE = "Fast charge active"
 ANDROID_CMD_SETTLE = {
     1: 0.005,
     2: 0.005,
@@ -156,6 +159,125 @@ def write_state_file(path, value):
             f.write("\n")
     except OSError as e:
         print(f"warning: failed to write {path}: {e}", file=sys.stderr)
+
+
+def parse_power_watts(value):
+    try:
+        power = int(value.strip(), 0)
+    except ValueError:
+        return None
+
+    if power <= 0:
+        return None
+    return power
+
+
+def current_power_max_watts(root):
+    path = os.path.join(root, "power_max")
+    if not os.path.exists(path):
+        return None
+    try:
+        return parse_power_watts(read_node(root, "power_max"))
+    except OSError as e:
+        print(f"warning: failed to read {path}: {e}", file=sys.stderr)
+        return None
+
+
+def wait_power_max_watts(root, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        watts = current_power_max_watts(root)
+        if watts:
+            return watts
+        time.sleep(0.1)
+    return current_power_max_watts(root)
+
+
+def gvariant_string(value):
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def notify_session_bus(bus, uid, title, body):
+    env = os.environ.copy()
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+    env["XDG_RUNTIME_DIR"] = os.path.dirname(bus)
+
+    def drop_privileges():
+        if os.geteuid() != 0:
+            return
+        entry = pwd.getpwuid(uid)
+        os.setgid(entry.pw_gid)
+        os.setuid(uid)
+
+    cmd = [
+        "gdbus", "call", "--session",
+        "--dest", "org.freedesktop.Notifications",
+        "--object-path", "/org/freedesktop/Notifications",
+        "--method", "org.freedesktop.Notifications.Notify",
+        gvariant_string("xiaomi-mipps-auth"),
+        "0",
+        gvariant_string("battery-good-symbolic"),
+        gvariant_string(title),
+        gvariant_string(body),
+        "[]",
+        "{}",
+        "5000",
+    ]
+    subprocess.run(cmd, env=env, preexec_fn=drop_privileges,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=2, check=True)
+
+
+def pd_verified(root):
+    path = os.path.join(root, "pd_verifed")
+    if not os.path.exists(path):
+        return False
+    try:
+        return read_node(root, "pd_verifed").strip() == "1"
+    except OSError:
+        return False
+
+
+def charge_mode_body(mode, watts):
+    if mode == "MiPPS":
+        return f"MiPPS enabled at {watts}W"
+    return f"PPS enabled at {watts}W"
+
+
+def notify_charge_active(root, mode, timeout=2.0):
+    watts = wait_power_max_watts(root, timeout)
+    if not watts:
+        return False
+
+    body = charge_mode_body(mode, watts)
+    sent = False
+    for bus in sorted(glob.glob("/run/user/[0-9]*/bus")):
+        try:
+            st = os.stat(bus)
+            notify_session_bus(bus, st.st_uid,
+                               FAST_CHARGE_NOTIFICATION_TITLE, body)
+            sent = True
+        except (KeyError, OSError, subprocess.SubprocessError) as e:
+            print(f"warning: failed to send notification on {bus}: {e}",
+                  file=sys.stderr)
+
+    if sent:
+        print(f"fast_charge_notification={mode}:{watts}W")
+    else:
+        print("warning: no desktop session accepted fast charge notification",
+              file=sys.stderr)
+    return sent
+
+
+def notify_pps_if_active(root, timeout=2.0):
+    return notify_charge_active(root, "PPS", timeout)
+
+
+def notify_completed_charge(root, pd_auth=None, timeout=2.0):
+    if pd_auth is None:
+        pd_auth = pd_verified(root)
+    mode = "MiPPS" if pd_auth else "PPS"
+    return notify_charge_active(root, mode, timeout)
 
 
 def wait_real_type(root, timeout):
@@ -397,6 +519,7 @@ def main():
         enable_battery_auth(root)
         print("MiPPS auth sequence already completed")
         print_status(root)
+        notify_completed_charge(root)
         return
 
     try:
@@ -470,7 +593,10 @@ def main():
         print(f"pd_auth={1 if pd_auth else 0}")
         print("MiPPS auth sequence completed")
         print_status(root)
+        notify_completed_charge(root, pd_auth)
     except UnsupportedChargerError as e:
+        if e.terminal:
+            notify_pps_if_active(root)
         if attach_token and e.terminal:
             write_state_file(args.state_file, attach_token)
         raise
