@@ -340,13 +340,6 @@ def notify_charge_profile(root, pd_auth, timeout=2.0):
     return sent
 
 
-def notify_pps_if_active(root, timeout=2.0):
-    if pd_verified(root):
-        print("fast_charge_notification=none")
-        return False
-    return notify_charge_profile(root, False, timeout)
-
-
 def notify_completed_charge(root, pd_auth=None, timeout=2.0):
     if pd_auth is None:
         pd_auth = pd_verified(root)
@@ -665,8 +658,7 @@ def main():
         print_status(root)
         notify_completed_charge(root, pd_auth)
     except UnsupportedChargerError as e:
-        if e.terminal:
-            notify_pps_if_active(root)
+        notify_completed_charge(root)
         if attach_token and e.terminal:
             write_state_file(args.state_file, attach_token)
         raise
