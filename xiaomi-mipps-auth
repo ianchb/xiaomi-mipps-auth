@@ -47,6 +47,9 @@ FG_KEYS = [
 
 XIAOMI_SVID = 0x2717
 FAST_CHARGE_NOTIFICATION_TITLE = "Fast charge active"
+NOTIFICATION_STATE_FILE = "/run/xiaomi-mipps-auth/last-notification"
+USB_ONLINE_STATE_FILE = "/run/xiaomi-mipps-auth/usb-online"
+SYSTEMD_UNIT = "xiaomi-mipps-auth.service"
 ANDROID_CMD_SETTLE = {
     1: 0.005,
     2: 0.005,
@@ -159,6 +162,13 @@ def write_state_file(path, value):
             f.write("\n")
     except OSError as e:
         print(f"warning: failed to write {path}: {e}", file=sys.stderr)
+
+
+def start_systemd_unit(unit):
+    systemctl = "/usr/bin/systemctl" if os.path.exists("/usr/bin/systemctl") else "systemctl"
+    subprocess.run([systemctl, "--no-block", "start", unit],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=2, check=True)
 
 
 def parse_power_watts(value):
@@ -569,23 +579,34 @@ def main():
     parser.add_argument("--state-file", default="/run/xiaomi-mipps-auth/last-attach",
                         help="state file used by --once-per-attach")
     parser.add_argument("--clear-notification", action="store_true",
-                        help="clear the saved notification state and exit")
-    parser.add_argument("--notification-state-file",
-                        default="/run/xiaomi-mipps-auth/last-notification",
-                        help="state file used for notification deduplication")
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--usb-online-trigger", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=2.0)
     args = parser.parse_args()
 
     if args.clear_notification:
-        write_state_file(args.notification_state_file, "none")
+        write_state_file(NOTIFICATION_STATE_FILE, "none")
+        write_state_file(USB_ONLINE_STATE_FILE, "0")
         print("fast_charge_notification_state=cleared")
+        return
+
+    if args.usb_online_trigger:
+        if read_state_file(USB_ONLINE_STATE_FILE) == "1":
+            print("usb_online_trigger=skipped")
+            return
+        write_state_file(USB_ONLINE_STATE_FILE, "1")
+        start_systemd_unit(SYSTEMD_UNIT)
+        print("usb_online_trigger=started")
         return
 
     root = args.sysfs or find_xiaomi_dir()
     if not wait_usb_online(args.timeout):
         print("usb_online=0")
-        write_state_file(args.notification_state_file, "none")
+        write_state_file(NOTIFICATION_STATE_FILE, "none")
+        write_state_file(USB_ONLINE_STATE_FILE, "0")
         return
+    write_state_file(USB_ONLINE_STATE_FILE, "1")
 
     attach_token = current_attach_token() if args.once_per_attach else None
     if args.once_per_attach:
@@ -603,7 +624,7 @@ def main():
         enable_battery_auth(root)
         print("MiPPS auth sequence already completed")
         print_status(root)
-        notify_completed_charge(root, args.notification_state_file)
+        notify_completed_charge(root, NOTIFICATION_STATE_FILE)
         return
 
     try:
@@ -679,9 +700,9 @@ def main():
         print(f"pd_auth={1 if pd_auth else 0}")
         print("MiPPS auth sequence completed")
         print_status(root)
-        notify_completed_charge(root, args.notification_state_file, pd_auth)
+        notify_completed_charge(root, NOTIFICATION_STATE_FILE, pd_auth)
     except UnsupportedChargerError as e:
-        notify_completed_charge(root, args.notification_state_file)
+        notify_completed_charge(root, NOTIFICATION_STATE_FILE)
         if attach_token and e.terminal:
             write_state_file(args.state_file, attach_token)
         raise
