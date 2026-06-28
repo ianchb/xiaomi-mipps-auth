@@ -1,5 +1,5 @@
 Package: xiaomi-mipps-auth
-Version: 0.13
+Version: 0.20
 Section: admin
 Priority: optional
 Architecture: arm64

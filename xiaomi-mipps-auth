@@ -48,6 +48,7 @@ FG_KEYS = [
 XIAOMI_SVID = 0x2717
 FAST_CHARGE_NOTIFICATION_TITLE = "Fast charge active"
 NOTIFICATION_STATE_FILE = "/run/xiaomi-mipps-auth/last-notification"
+CHARGE_PROFILE_STATE_FILE = "/run/xiaomi-mipps-auth/charge-profile"
 USB_ONLINE_STATE_FILE = "/run/xiaomi-mipps-auth/usb-online"
 SYSTEMD_UNIT = "xiaomi-mipps-auth.service"
 ANDROID_CMD_SETTLE = {
@@ -325,8 +326,17 @@ def charge_profile_notification_key(profile):
     return f"{attach_token}:{mode}:{watts}"
 
 
+def write_charge_profile(profile):
+    if not profile:
+        write_state_file(CHARGE_PROFILE_STATE_FILE, "none")
+        return
+    mode, _ = profile
+    write_state_file(CHARGE_PROFILE_STATE_FILE, mode)
+
+
 def notify_charge_profile(root, pd_auth, state_file, timeout=2.0):
     profile = wait_charge_profile(root, pd_auth, timeout)
+    write_charge_profile(profile)
     if not profile:
         print("fast_charge_notification=none")
         write_state_file(state_file, "none")
@@ -587,6 +597,7 @@ def main():
 
     if args.clear_notification:
         write_state_file(NOTIFICATION_STATE_FILE, "none")
+        write_state_file(CHARGE_PROFILE_STATE_FILE, "none")
         write_state_file(USB_ONLINE_STATE_FILE, "0")
         print("fast_charge_notification_state=cleared")
         return
@@ -604,6 +615,7 @@ def main():
     if not wait_usb_online(args.timeout):
         print("usb_online=0")
         write_state_file(NOTIFICATION_STATE_FILE, "none")
+        write_state_file(CHARGE_PROFILE_STATE_FILE, "none")
         write_state_file(USB_ONLINE_STATE_FILE, "0")
         return
     write_state_file(USB_ONLINE_STATE_FILE, "1")
