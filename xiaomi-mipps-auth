@@ -299,12 +299,12 @@ def current_charge_profile(root, pd_auth):
     if pd_auth:
         return "MiPPS", watts
 
-    if not fastchg_active:
-        if real_type in ("PD", "PD_PPS"):
-            return "PD", watts
-        return None
+    if real_type == "PD_PPS":
+        return "PPS", watts
 
-    if real_type in ("PD", "PD_PPS"):
+    if real_type == "PD":
+        if not fastchg_active:
+            return "PD", watts
         return "PPS", watts
 
     return None
